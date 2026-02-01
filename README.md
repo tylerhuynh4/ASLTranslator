@@ -14,6 +14,30 @@
    **Tech Stack**:
    - Language/Speech Pipeline:
 
+## Requirements
+Note: Requirements are subject to change as development progresses
+- Real time webcam hand detection 
+- Accurate recognition of ASL ABC & some words (static) 
+- Text output from detected signs
+- Stability of software and accuracy of interpretation
+- Translation to at least 2 languages 
+- Text to speech (audio output)
+- Clean UI 
+- Visual indicators + stats (shown in UI preview from Tyler)
+- Dynamic signage 
+- Translate at least 1 full sentence of signs 
+- Feedback Adaptation (User Profiles)
+- ADA requirements (Like color contrast, keyboard navigation)
+- Logging of detected signs
+- Saving logs of interpretation
+- Live correction of signs/sentence structure
+- Toggle overlay and indicators on/off
+- UI Themes
+- Hardware configuration (changing camera/speaker)
+- User being able to flag incorrect translations
+- Customize TTS voice
+- Mute/unmute TTS voice
+
    
 ## Members:
   
@@ -21,5 +45,5 @@
    | :----: | :------: | :-------:    |
    | The Tyler Huynh | <tylerhuynh4@csu.fullerton.edu> | @tylerhuynh4 |
    | Michael Bui | <buimichael@csu.fullerton.edu> | @buimichael |
-   | Minh Duy Tran Nguyen | <mduy2003@csu.fullerton.edu>| @mduy2003 |
+   | Duy Nguyen | <mduy2003@csu.fullerton.edu>| @mduy2003 |
    | Ashley Park | <_______@csu.fullerton.edu> | @524ashley |
