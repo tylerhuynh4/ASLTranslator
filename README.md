@@ -46,4 +46,4 @@ Note: Requirements are subject to change as development progresses
    | The Tyler Huynh | <tylerhuynh4@csu.fullerton.edu> | @tylerhuynh4 |
    | Michael Bui | <buimichael@csu.fullerton.edu> | @buimichael |
    | Duy Nguyen | <mduy2003@csu.fullerton.edu>| @mduy2003 |
-   | Ashley Park | <_______@csu.fullerton.edu> | @524ashley |
+   | Ashley Park | <0524ashley@csu.fullerton.edu> | @0524ashley |
