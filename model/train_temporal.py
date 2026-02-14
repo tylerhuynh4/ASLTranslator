@@ -158,6 +158,9 @@ def main() -> int:
     input_dim = int(X_train.shape[2])
     num_classes = int(y.max()) + 1
     classes, counts = np.unique(y_train, return_counts=True)
+    print("Class sample counts:")
+    for label, count in zip(classes, counts):
+        print(f"  Label {label_names[label]} ({label}): {count} samples")
     class_weights = np.zeros(num_classes, dtype=np.float32)
     for label, count in zip(classes, counts):
         class_weights[int(label)] = 1.0 / float(count)
@@ -339,11 +342,9 @@ def main() -> int:
 
     np.savez_compressed(scaler_path, mean=mean, std=std)
 
-    labels_path.write_text(json.dumps(label_names, indent=2), encoding="utf-8")
-
     print(f"Best model saved: {model_path}")
     print(f"Scaler saved: {scaler_path}")
-    print(f"Labels saved: {labels_path}")
+    print(f"Labels file used: {labels_path}")
     return 0
 
 
