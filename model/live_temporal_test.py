@@ -22,6 +22,7 @@ MODEL_PATH = SCRIPT_DIR / "data" / "msasl_temporal_model.pt"
 SCALER_PATH = SCRIPT_DIR / "data" / "msasl_temporal_scaler.npz"
 LABELS_PATH = SCRIPT_DIR / "data" / "msasl_temporal_labels.json"
 HAND_MODEL_PATH = SCRIPT_DIR / "hand_landmarker.task"
+POSE_MODEL_PATH = SCRIPT_DIR / "pose_landmarker_full.task"
 
 
 def load_labels(path: Path, num_classes: int) -> list[str]:
@@ -34,90 +35,124 @@ def load_labels(path: Path, num_classes: int) -> list[str]:
     return labels[:num_classes]
 
 
+
 def detect_hands(landmarker, frame: np.ndarray):
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
     return landmarker.detect(mp_image)
 
+def detect_pose(pose_landmarker, frame: np.ndarray):
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+    return pose_landmarker.detect(mp_image)
 
-def features_from_result(result, two_hands: bool, hand_presence: bool) -> np.ndarray | None:
-    if not result.hand_landmarks:
-        return None
+
+
+# Updated to always return fixed-length feature vector (hand + pose)
+def features_from_results(hand_result, pose_result, two_hands: bool, hand_presence: bool) -> np.ndarray:
+    # --- Hand features (always fixed length) ---
     if not two_hands:
-        landmarks = result.hand_landmarks[0]
-        coords = np.array([[lm.x, lm.y, lm.z] for lm in landmarks], dtype=np.float32)
-        return coords.reshape(-1)
-
-    left = None
-    right = None
-    for hand_landmarks, handedness in zip(result.hand_landmarks, result.handedness):
-        label = handedness[0].category_name
-        if label == "Left":
-            left = hand_landmarks
-        elif label == "Right":
-            right = hand_landmarks
-
-    if left is None and right is None:
-        return None
-
-    zero = np.zeros((21, 3), dtype=np.float32)
-    left_coords = (
-        np.array([[lm.x, lm.y, lm.z] for lm in left], dtype=np.float32) if left else zero
-    )
-    right_coords = (
-        np.array([[lm.x, lm.y, lm.z] for lm in right], dtype=np.float32) if right else zero
-    )
-    feat = np.concatenate([left_coords.reshape(-1), right_coords.reshape(-1)], axis=0)
-    if hand_presence:
-        feat = np.concatenate(
-            [feat, np.array([1.0 if left else 0.0, 1.0 if right else 0.0], dtype=np.float32)],
-            axis=0,
+        # One hand: 21*3
+        if hand_result.hand_landmarks:
+            landmarks = hand_result.hand_landmarks[0]
+            coords = np.array([[lm.x, lm.y, lm.z] for lm in landmarks], dtype=np.float32)
+            hand_feat = coords.reshape(-1)
+        else:
+            hand_feat = np.zeros(21*3, dtype=np.float32)
+    else:
+        # Two hands: 2*21*3
+        left = None
+        right = None
+        if hand_result.hand_landmarks:
+            for hand_landmarks, handedness in zip(hand_result.hand_landmarks, hand_result.handedness):
+                label = handedness[0].category_name
+                if label == "Left":
+                    left = hand_landmarks
+                elif label == "Right":
+                    right = hand_landmarks
+        zero = np.zeros((21, 3), dtype=np.float32)
+        left_coords = (
+            np.array([[lm.x, lm.y, lm.z] for lm in left], dtype=np.float32) if left else zero
         )
-    return feat
+        right_coords = (
+            np.array([[lm.x, lm.y, lm.z] for lm in right], dtype=np.float32) if right else zero
+        )
+        hand_feat = np.concatenate([left_coords.reshape(-1), right_coords.reshape(-1)], axis=0)
+        if hand_presence:
+            hand_feat = np.concatenate(
+                [hand_feat, np.array([1.0 if left else 0.0, 1.0 if right else 0.0], dtype=np.float32)],
+                axis=0,
+            )
+
+    # --- Pose features (nose, left elbow, right elbow as example, always fixed length) ---
+    important_indices = [0, 13, 14]
+    pose_coords = []
+    if pose_result.pose_landmarks:
+        pose_landmarks = pose_result.pose_landmarks[0]
+        for idx in important_indices:
+            lm = pose_landmarks[idx]
+            pose_coords.extend([lm.x, lm.y, lm.z])
+    else:
+        pose_coords = [0.0] * (len(important_indices) * 3)
+    pose_feat = np.array(pose_coords, dtype=np.float32)
+
+    # --- Combine features (always same length) ---
+    return np.concatenate([hand_feat, pose_feat], axis=0)
 
 
-def draw_hand_landmarks(frame: np.ndarray, result) -> None:
-    if not result.hand_landmarks:
-        return
-    height, width = frame.shape[:2]
-    connections = [
-        (0, 1), (1, 2), (2, 3), (3, 4),
-        (0, 5), (5, 6), (6, 7), (7, 8),
-        (0, 9), (9, 10), (10, 11), (11, 12),
-        (0, 13), (13, 14), (14, 15), (15, 16),
-        (0, 17), (17, 18), (18, 19), (19, 20),
-        (5, 9), (9, 13), (13, 17),
-    ]
+def draw_hand_landmarks(frame: np.ndarray, hand_result, pose_result=None) -> None:
+    # Draw hand landmarks
+    if hand_result and hand_result.hand_landmarks:
+        height, width = frame.shape[:2]
+        connections = [
+            (0, 1), (1, 2), (2, 3), (3, 4),
+            (0, 5), (5, 6), (6, 7), (7, 8),
+            (0, 9), (9, 10), (10, 11), (11, 12),
+            (0, 13), (13, 14), (14, 15), (15, 16),
+            (0, 17), (17, 18), (18, 19), (19, 20),
+            (5, 9), (9, 13), (13, 17),
+        ]
 
-    for hand_landmarks, handedness in zip(result.hand_landmarks, result.handedness):
-        label = handedness[0].category_name
-        label = "Right" if label == "Left" else "Left"
-        confidence = handedness[0].score
+        for hand_landmarks, handedness in zip(hand_result.hand_landmarks, hand_result.handedness):
+            label = handedness[0].category_name
+            label = "Right" if label == "Left" else "Left"
+            confidence = handedness[0].score
+            for lm in hand_landmarks:
+                x = width - int(lm.x * width) - 1
+                y = int(lm.y * height)
+                cv2.circle(frame, (x, y), 3, (0, 255, 0), -1)
 
-        for lm in hand_landmarks:
+            for start, end in connections:
+                start_lm = hand_landmarks[start]
+                end_lm = hand_landmarks[end]
+                start_pos = (width - int(start_lm.x * width) - 1, int(start_lm.y * height))
+                end_pos = (width - int(end_lm.x * width) - 1, int(end_lm.y * height))
+                cv2.line(frame, start_pos, end_pos, (255, 0, 0), 2)
+
+            wrist = hand_landmarks[0]
+            wx = width - int(wrist.x * width) - 1
+            wy = int(wrist.y * height)
+            cv2.putText(
+                frame,
+                f"{label} ({confidence:.2f})",
+                (wx - 30, wy - 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2,
+            )
+
+    # Draw pose landmarks (nose, left elbow, right elbow)
+    if pose_result and pose_result.pose_landmarks:
+        height, width = frame.shape[:2]
+        pose_landmarks = pose_result.pose_landmarks[0]
+        important_indices = [0, 13, 14]  # nose, left elbow, right elbow
+        colors = [(0, 0, 255), (255, 255, 0), (255, 0, 255)]
+        for idx, color in zip(important_indices, colors):
+            lm = pose_landmarks[idx]
             x = width - int(lm.x * width) - 1
             y = int(lm.y * height)
-            cv2.circle(frame, (x, y), 3, (0, 255, 0), -1)
-
-        for start, end in connections:
-            start_lm = hand_landmarks[start]
-            end_lm = hand_landmarks[end]
-            start_pos = (width - int(start_lm.x * width) - 1, int(start_lm.y * height))
-            end_pos = (width - int(end_lm.x * width) - 1, int(end_lm.y * height))
-            cv2.line(frame, start_pos, end_pos, (255, 0, 0), 2)
-
-        wrist = hand_landmarks[0]
-        wx = width - int(wrist.x * width) - 1
-        wy = int(wrist.y * height)
-        cv2.putText(
-            frame,
-            f"{label} ({confidence:.2f})",
-            (wx - 30, wy - 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-        )
+            cv2.circle(frame, (x, y), 6, color, -1)
 
 
 def main() -> int:
@@ -180,6 +215,9 @@ def main() -> int:
     elif input_dim == 128:
         two_hands = True
         hand_presence = True
+    elif input_dim == 137:
+        two_hands = True
+        hand_presence = True
 
     scaler = np.load(scaler_path)
     mean = scaler["mean"].astype(np.float32)
@@ -221,9 +259,11 @@ def main() -> int:
     BaseOptions = python.BaseOptions
     HandLandmarker = vision.HandLandmarker
     HandLandmarkerOptions = vision.HandLandmarkerOptions
+    PoseLandmarker = vision.PoseLandmarker
+    PoseLandmarkerOptions = vision.PoseLandmarkerOptions
     VisionRunningMode = vision.RunningMode
 
-    options = HandLandmarkerOptions(
+    hand_options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(HAND_MODEL_PATH)),
         running_mode=VisionRunningMode.IMAGE,
         num_hands=2 if two_hands else 1,
@@ -231,20 +271,34 @@ def main() -> int:
         min_hand_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
+    pose_options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=str(POSE_MODEL_PATH)),
+        running_mode=VisionRunningMode.IMAGE,
+        num_poses=1,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
 
-    landmarker = HandLandmarker.create_from_options(options)
+    hand_landmarker = HandLandmarker.create_from_options(hand_options)
+    pose_landmarker = PoseLandmarker.create_from_options(pose_options)
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
         print("Failed to open webcam.")
-        landmarker.close()
+        hand_landmarker.close()
+        pose_landmarker.close()
         return 1
+
 
     frame_buffer: deque[np.ndarray] = deque(maxlen=seq_len)
     prob_buffer: deque[np.ndarray] = deque(maxlen=max(1, args.smooth))
     valid_count = 0
+    input_dim = None
 
     print("Live Temporal Test")
     print("Press 'q' to quit")
+
+
 
     while True:
         success, frame = cap.read()
@@ -252,14 +306,17 @@ def main() -> int:
             break
 
         display_frame = cv2.flip(frame, 1)
-        result = detect_hands(landmarker, frame)
-        draw_hand_landmarks(display_frame, result)
-        feat = features_from_result(result, two_hands, hand_presence)
-        if feat is None:
-            frame_buffer.append(np.zeros(input_dim, dtype=np.float32))
-        else:
-            frame_buffer.append(feat)
-            valid_count = min(seq_len, valid_count + 1)
+        hand_result = detect_hands(hand_landmarker, frame)
+        pose_result = detect_pose(pose_landmarker, frame)
+        draw_hand_landmarks(display_frame, hand_result, pose_result)
+        feat = features_from_results(hand_result, pose_result, two_hands, hand_presence)
+
+        # Dynamically set input_dim after first feature
+        if input_dim is None:
+            input_dim = len(feat)
+
+        frame_buffer.append(feat)
+        valid_count = min(seq_len, valid_count + 1)
 
         if len(frame_buffer) < seq_len:
             pad = [np.zeros(input_dim, dtype=np.float32)] * (seq_len - len(frame_buffer))
@@ -328,9 +385,11 @@ def main() -> int:
         if cv2.waitKey(5) & 0xFF == ord("q"):
             break
 
+
     cap.release()
     cv2.destroyAllWindows()
-    landmarker.close()
+    hand_landmarker.close()
+    pose_landmarker.close()
     return 0
 
 
