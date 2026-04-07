@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import csv
 from pathlib import Path
 
 import cv2
@@ -22,37 +23,21 @@ except Exception:
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MODEL_PATH = SCRIPT_DIR / "hand_landmarker.task"
-POSE_MODEL_PATH = SCRIPT_DIR / "pose_landmarker_full.task"
-DEFAULT_MANIFEST = SCRIPT_DIR / "data" / "msasl_all" / "manifest.jsonl"
-DEFAULT_NEG_DIR = SCRIPT_DIR / "data" / "negatives" / "clips"
-DEFAULT_OUT = SCRIPT_DIR / "data" / "msasl_sequences.npz"
-DEFAULT_CLASSES = SCRIPT_DIR.parent / "MS-ASL" / "MSASL_classes.json"
-DEFAULT_SUBSET = SCRIPT_DIR / "data" / "subset_signs.json"
-
-
-def load_manifest(path: Path) -> list[dict]:
-    items = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            items.append(json.loads(line))
-    return items
-
-
-def load_label_names(path: Path) -> list[str]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+# Project-level model_training directory (one level above this src file)
+MODEL_ROOT = SCRIPT_DIR.parent
+WORKSPACE_ROOT = SCRIPT_DIR.parent.parent
+MODEL_PATH = MODEL_ROOT / "hand_landmarker.task"
+POSE_MODEL_PATH = MODEL_ROOT / "pose_landmarker_full.task"
+DEFAULT_SPLIT = WORKSPACE_ROOT / "ASL_Citizen" / "splits" / "train.csv"
+# Data and output paths are under the model_training root, not the src dir
+DEFAULT_NEG_DIR = MODEL_ROOT / "data" / "negatives" / "clips"
+DEFAULT_OUT = MODEL_ROOT / "data" / "asl_sequences.npz"
+DEFAULT_SUBSET = WORKSPACE_ROOT / "ASL_Citizen" / "subset_glosses.txt"
 
 
 def load_subset_signs(path: Path) -> list[str]:
     with path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    return [str(item).strip() for item in data if str(item).strip()]
-
-
+        return [line.strip() for line in handle if line.strip()]
 
 
 def extract_frame_landmarks(
@@ -69,12 +54,19 @@ def extract_frame_landmarks(
     # Pose landmarks
     pose_result = pose_landmarker.detect(mp_image)
 
-    # --- Hand features (always fixed length) ---
+    # --- Extract reference point (nose) for position normalization ---
+    reference = np.array([0.5, 0.5, 0.0], dtype=np.float32)  # default center
+    if pose_result.pose_landmarks:
+        nose = pose_result.pose_landmarks[0][0]  # index 0 is nose
+        reference = np.array([nose.x, nose.y, nose.z], dtype=np.float32)
+
+    # --- Hand features (always fixed length, normalized relative to nose) ---
     if not two_hands:
         # One hand: 21*3
         if hand_result.hand_landmarks:
             landmarks = hand_result.hand_landmarks[0]
             coords = np.array([[lm.x, lm.y, lm.z] for lm in landmarks], dtype=np.float32)
+            coords = coords - reference  # Position-invariant normalization
             hand_feat = coords.reshape(-1)
         else:
             hand_feat = np.zeros(21*3, dtype=np.float32)
@@ -91,10 +83,10 @@ def extract_frame_landmarks(
                     right = hand_landmarks
         zero = np.zeros((21, 3), dtype=np.float32)
         left_coords = (
-            np.array([[lm.x, lm.y, lm.z] for lm in left], dtype=np.float32) if left else zero
+            np.array([[lm.x, lm.y, lm.z] for lm in left], dtype=np.float32) - reference if left else zero
         )
         right_coords = (
-            np.array([[lm.x, lm.y, lm.z] for lm in right], dtype=np.float32) if right else zero
+            np.array([[lm.x, lm.y, lm.z] for lm in right], dtype=np.float32) - reference if right else zero
         )
         hand_feat = np.concatenate([left_coords.reshape(-1), right_coords.reshape(-1)], axis=0)
         if hand_presence:
@@ -103,20 +95,9 @@ def extract_frame_landmarks(
                 axis=0,
             )
 
-    # --- Pose features (nose, left elbow, right elbow as example, always fixed length) ---
-    important_indices = [0, 13, 14]
-    pose_coords = []
-    if pose_result.pose_landmarks:
-        pose_landmarks = pose_result.pose_landmarks[0]
-        for idx in important_indices:
-            lm = pose_landmarks[idx]
-            pose_coords.extend([lm.x, lm.y, lm.z])
-    else:
-        pose_coords = [0.0] * (len(important_indices) * 3)
-    pose_feat = np.array(pose_coords, dtype=np.float32)
-
-    # --- Combine features (always same length) ---
-    return np.concatenate([hand_feat, pose_feat], axis=0)
+    # --- No pose features (elbows removed as noise) ---
+    # Return only hand features normalized relative to nose
+    return hand_feat
 
 
 
@@ -171,55 +152,56 @@ def extract_clip_sequence(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Extract landmark sequences")
-    parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
+    parser = argparse.ArgumentParser(description="Extract landmark sequences from ASL_Citizen CSV")
+    parser.add_argument("--split", default=str(DEFAULT_SPLIT), help="CSV split file (train.csv, val.csv, test.csv)")
     parser.add_argument("--neg-dir", default=str(DEFAULT_NEG_DIR))
     parser.add_argument("--out", default=str(DEFAULT_OUT))
-    parser.add_argument("--classes", default=str(DEFAULT_CLASSES))
-    parser.add_argument("--subset-file", default="", help="JSON list of class names to include")
+    parser.add_argument("--subset-file", default=str(DEFAULT_SUBSET), help="TXT file of glosses to include")
     parser.add_argument("--seq-len", type=int, default=32)
     parser.add_argument("--frame-stride", type=int, default=2)
-    # Removed --one-hand and --no-hand-presence flags to always use two hands and presence flags
     args = parser.parse_args()
 
     if not MODEL_PATH.exists():
         print(f"Missing model file: {MODEL_PATH}")
         return 1
 
-    manifest_path = Path(args.manifest)
-    if not manifest_path.exists():
-        print(f"Missing manifest: {manifest_path}")
+    WORKSPACE_ROOT = SCRIPT_DIR.parent.parent
+    split_path = Path(args.split)
+    if not split_path.is_absolute():
+        split_path = WORKSPACE_ROOT / args.split
+    if not split_path.exists():
+        print(f"Missing split file: {split_path}")
         return 1
 
-    items = load_manifest(manifest_path)
-    if not items:
-        print("Manifest is empty.")
+    subset_path = Path(args.subset_file)
+    if not subset_path.is_absolute():
+        subset_path = WORKSPACE_ROOT / args.subset_file
+    if not subset_path.exists():
+        print(f"Missing subset file: {subset_path}")
         return 1
+    subset_signs = load_subset_signs(subset_path)
+    if not subset_signs:
+        print(f"Subset file is empty: {subset_path}")
+        return 1
+    subset_index = {name: idx for idx, name in enumerate(subset_signs)}
 
-    label_names = None
-    subset_signs = None
-    subset_index = None
-    if args.subset_file:
-        subset_path = Path(args.subset_file)
-    else:
-        subset_path = None
-
-    if subset_path is not None:
-        if not subset_path.exists():
-            print(f"Missing subset file: {subset_path}")
-            return 1
-        classes_path = Path(args.classes)
-        if not classes_path.exists():
-            print(f"Missing classes: {classes_path}")
-            return 1
-        label_names = load_label_names(classes_path)
-        subset_signs = load_subset_signs(subset_path)
-        if not subset_signs:
-            print(f"Subset file is empty: {subset_path}")
-            return 1
-        subset_index = {name: idx for idx, name in enumerate(subset_signs)}
+    # Read CSV and filter items
+    items = []
+    with split_path.open("r", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            gloss = row["Gloss"].strip()
+            if gloss in subset_index:
+                items.append({
+                    "video_file": row["Video file"].strip(),
+                    "gloss": gloss,
+                    "label": subset_index[gloss],
+                    "participant": row["Participant ID"].strip(),
+                })
 
     neg_dir = Path(args.neg_dir)
+    if not neg_dir.is_absolute():
+        neg_dir = SCRIPT_DIR.joinpath(args.neg_dir).resolve()
     neg_paths = sorted(neg_dir.glob("*.mp4"))
 
     BaseOptions = python.BaseOptions
@@ -259,26 +241,20 @@ def main() -> int:
 
     total_items = len(items)
     total_negs = len(neg_paths)
-    total_expected = total_items + total_negs
     kept = 0
-    print(f"Starting extraction: {total_items} manifest clips + {total_negs} negatives")
+    print(f"Starting extraction: {total_items} filtered clips + {total_negs} negatives")
 
     if tqdm is None:
         print("Tip: Install tqdm for progress bars: python -m pip install tqdm")
 
-
-    manifest_iter = tqdm(items, desc="Manifest clips", unit="clip") if tqdm else items
+    manifest_iter = tqdm(items, desc="ASL_Citizen clips", unit="clip") if tqdm else items
     for item in manifest_iter:
-        clip_path = Path(item["clip_path"])
-        if label_names is not None and subset_signs is not None and subset_index is not None:
-            label_name = label_names[int(item["label"])]
-            if label_name not in subset_index:
-                continue
-            label_id = subset_index[label_name]
+        # Video path is relative to ASL_Citizen/videos/
+        video_path = WORKSPACE_ROOT / "ASL_Citizen" / "videos" / item["video_file"]
         result = extract_clip_sequence(
             landmarker,
             pose_landmarker,
-            clip_path,
+            video_path,
             args.frame_stride,
             args.seq_len,
             use_two_hands,
@@ -289,18 +265,12 @@ def main() -> int:
         seq, length = result
         sequences.append(seq)
         lengths.append(length)
-        if label_names is not None and subset_signs is not None and subset_index is not None:
-            labels.append(int(label_id))
-        else:
-            labels.append(int(item["label"]))
-        paths.append(str(clip_path))
-        texts.append(item.get("text", ""))
+        labels.append(int(item["label"]))
+        paths.append(str(video_path))
+        texts.append(item["gloss"])
         kept += 1
 
-    if subset_signs is not None:
-        nonsign_label = len(subset_signs)
-    else:
-        nonsign_label = max(labels) + 1 if labels else 0
+    nonsign_label = len(subset_signs)
     nonsign_count = 0
 
     neg_iter = tqdm(neg_paths, desc="Negative clips", unit="clip") if tqdm else neg_paths
@@ -359,21 +329,13 @@ def main() -> int:
         "hand_presence": bool(use_hand_presence),
         "nonsign_label": int(nonsign_label),
         "nonsign_count": int(nonsign_count),
+        "labels": subset_signs + ["Non-sign"],
     }
-    labels_path = None
-    if subset_signs is not None:
-        labels_path = out_path.with_name(f"{out_path.stem}_labels.json")
-        labels_path.write_text(
-            json.dumps(subset_signs + ["Non-sign"], indent=2),
-            encoding="utf-8",
-        )
-        meta["labels"] = str(labels_path)
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     print(f"Saved dataset: {out_path}")
     print(f"Metadata: {meta_path}")
-    if labels_path is not None:
-        print(f"Labels: {labels_path}")
+    print(f"Labels: {meta['labels']}")
     print(f"Samples: {meta['samples']} | Classes: {meta['classes']}")
     return 0
 

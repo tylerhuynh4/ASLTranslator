@@ -18,11 +18,21 @@ from mediapipe.tasks.python import vision
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-MODEL_PATH = SCRIPT_DIR / "data" / "msasl_temporal_model.pt"
-SCALER_PATH = SCRIPT_DIR / "data" / "msasl_temporal_scaler.npz"
-LABELS_PATH = SCRIPT_DIR / "data" / "msasl_temporal_labels.json"
-HAND_MODEL_PATH = SCRIPT_DIR / "hand_landmarker.task"
-POSE_MODEL_PATH = SCRIPT_DIR / "pose_landmarker_full.task"
+MODEL_ROOT = SCRIPT_DIR.parent
+WORKSPACE_ROOT = MODEL_ROOT.parent
+DEPLOY_MODEL_ROOT = WORKSPACE_ROOT / "model"
+MODEL_PATH = DEPLOY_MODEL_ROOT / "asl_citizen_temporal_modelv1.pt"
+SCALER_PATH = DEPLOY_MODEL_ROOT / "asl_citizen_temporal_scalerv1.npz"
+LABELS_PATH = DEPLOY_MODEL_ROOT / "asl_citizen_temporal_labelsv1.json"
+HAND_MODEL_PATH = MODEL_ROOT / "hand_landmarker.task"
+POSE_MODEL_PATH = MODEL_ROOT / "pose_landmarker_full.task"
+
+
+def resolve_path(raw_path: str, *, base_dir: Path = WORKSPACE_ROOT) -> Path:
+    path_obj = Path(raw_path)
+    if path_obj.is_absolute():
+        return path_obj
+    return (base_dir / path_obj).resolve()
 
 
 def load_labels(path: Path, num_classes: int) -> list[str]:
@@ -50,12 +60,19 @@ def detect_pose(pose_landmarker, frame: np.ndarray):
 
 # Updated to always return fixed-length feature vector (hand + pose)
 def features_from_results(hand_result, pose_result, two_hands: bool, hand_presence: bool) -> np.ndarray:
-    # --- Hand features (always fixed length) ---
+    # --- Extract reference point (nose) for position normalization ---
+    reference = np.array([0.5, 0.5, 0.0], dtype=np.float32)  # default center
+    if pose_result.pose_landmarks:
+        nose = pose_result.pose_landmarks[0][0]  # index 0 is nose
+        reference = np.array([nose.x, nose.y, nose.z], dtype=np.float32)
+
+    # --- Hand features (always fixed length, normalized relative to nose) ---
     if not two_hands:
         # One hand: 21*3
         if hand_result.hand_landmarks:
             landmarks = hand_result.hand_landmarks[0]
             coords = np.array([[lm.x, lm.y, lm.z] for lm in landmarks], dtype=np.float32)
+            coords = coords - reference  # Position-invariant normalization
             hand_feat = coords.reshape(-1)
         else:
             hand_feat = np.zeros(21*3, dtype=np.float32)
@@ -72,10 +89,10 @@ def features_from_results(hand_result, pose_result, two_hands: bool, hand_presen
                     right = hand_landmarks
         zero = np.zeros((21, 3), dtype=np.float32)
         left_coords = (
-            np.array([[lm.x, lm.y, lm.z] for lm in left], dtype=np.float32) if left else zero
+            np.array([[lm.x, lm.y, lm.z] for lm in left], dtype=np.float32) - reference if left else zero
         )
         right_coords = (
-            np.array([[lm.x, lm.y, lm.z] for lm in right], dtype=np.float32) if right else zero
+            np.array([[lm.x, lm.y, lm.z] for lm in right], dtype=np.float32) - reference if right else zero
         )
         hand_feat = np.concatenate([left_coords.reshape(-1), right_coords.reshape(-1)], axis=0)
         if hand_presence:
@@ -84,20 +101,9 @@ def features_from_results(hand_result, pose_result, two_hands: bool, hand_presen
                 axis=0,
             )
 
-    # --- Pose features (nose, left elbow, right elbow as example, always fixed length) ---
-    important_indices = [0, 13, 14]
-    pose_coords = []
-    if pose_result.pose_landmarks:
-        pose_landmarks = pose_result.pose_landmarks[0]
-        for idx in important_indices:
-            lm = pose_landmarks[idx]
-            pose_coords.extend([lm.x, lm.y, lm.z])
-    else:
-        pose_coords = [0.0] * (len(important_indices) * 3)
-    pose_feat = np.array(pose_coords, dtype=np.float32)
-
-    # --- Combine features (always same length) ---
-    return np.concatenate([hand_feat, pose_feat], axis=0)
+    # --- No pose features (elbows removed as noise) ---
+    # Return only hand features normalized relative to nose
+    return hand_feat
 
 
 def draw_hand_landmarks(frame: np.ndarray, hand_result, pose_result=None) -> None:
@@ -142,12 +148,12 @@ def draw_hand_landmarks(frame: np.ndarray, hand_result, pose_result=None) -> Non
                 2,
             )
 
-    # Draw pose landmarks (nose, left elbow, right elbow)
+    # Draw pose landmarks (nose only, no elbows)
     if pose_result and pose_result.pose_landmarks:
         height, width = frame.shape[:2]
         pose_landmarks = pose_result.pose_landmarks[0]
-        important_indices = [0, 13, 14]  # nose, left elbow, right elbow
-        colors = [(0, 0, 255), (255, 255, 0), (255, 0, 255)]
+        important_indices = [0]  # nose only
+        colors = [(0, 0, 255)]
         for idx, color in zip(important_indices, colors):
             lm = pose_landmarks[idx]
             x = width - int(lm.x * width) - 1
@@ -176,9 +182,9 @@ def main() -> int:
         print("Missing dependency: torch")
         return 2
 
-    model_path = Path(args.model)
-    scaler_path = Path(args.scaler)
-    labels_path = Path(args.labels)
+    model_path = resolve_path(args.model)
+    scaler_path = resolve_path(args.scaler)
+    labels_path = resolve_path(args.labels)
 
     if not model_path.exists():
         print(f"Missing model checkpoint: {model_path}")
@@ -208,11 +214,19 @@ def main() -> int:
 
     labels = load_labels(labels_path, num_classes)
 
+    # Infer two_hands and hand_presence from input_dim
+    # 63 = 1 hand only
+    # 126 = 2 hands
+    # 128 = 2 hands + presence
+    # 134 = 2 hands + presence + pose
     two_hands = False
     hand_presence = False
     if input_dim == 126:
         two_hands = True
     elif input_dim == 128:
+        two_hands = True
+        hand_presence = True
+    elif input_dim == 134:
         two_hands = True
         hand_presence = True
     elif input_dim == 137:
@@ -293,7 +307,6 @@ def main() -> int:
     frame_buffer: deque[np.ndarray] = deque(maxlen=seq_len)
     prob_buffer: deque[np.ndarray] = deque(maxlen=max(1, args.smooth))
     valid_count = 0
-    input_dim = None
 
     print("Live Temporal Test")
     print("Press 'q' to quit")
@@ -311,9 +324,11 @@ def main() -> int:
         draw_hand_landmarks(display_frame, hand_result, pose_result)
         feat = features_from_results(hand_result, pose_result, two_hands, hand_presence)
 
-        # Dynamically set input_dim after first feature
-        if input_dim is None:
-            input_dim = len(feat)
+        # Validate feature dimension matches model input
+        if len(feat) != input_dim:
+            print(f"Warning: Feature dimension mismatch. Expected {input_dim}, got {len(feat)}")
+            print(f"Model configured for: two_hands={two_hands}, hand_presence={hand_presence}")
+            continue
 
         frame_buffer.append(feat)
         valid_count = min(seq_len, valid_count + 1)

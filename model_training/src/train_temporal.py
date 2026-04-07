@@ -13,19 +13,43 @@ import numpy as np
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_DATA = SCRIPT_DIR / "data" / "msasl_sequences.npz"
-DEFAULT_CLASSES = SCRIPT_DIR.parent / "MS-ASL" / "MSASL_classes.json"
-DEFAULT_MODEL = SCRIPT_DIR / "data" / "msasl_temporal_model.pt"
-DEFAULT_SCALER = SCRIPT_DIR / "data" / "msasl_temporal_scaler.npz"
-DEFAULT_LABELS = SCRIPT_DIR / "data" / "msasl_temporal_labels.json"
+MODEL_ROOT = SCRIPT_DIR.parent
+WORKSPACE_ROOT = MODEL_ROOT.parent
+DEPLOY_MODEL_ROOT = WORKSPACE_ROOT / "model"
+DEFAULT_TRAIN_DATA = MODEL_ROOT / "data" / "subset_sequences_train.npz"
+DEFAULT_VAL_DATA = MODEL_ROOT / "data" / "subset_sequences_val.npz"
+DEFAULT_TEST_DATA = MODEL_ROOT / "data" / "subset_sequences_test.npz"
+DEFAULT_CLASSES = WORKSPACE_ROOT / "ASL_Citizen" / "subset_glosses.txt"
+DEFAULT_MODEL = DEPLOY_MODEL_ROOT / "asl_citizen_temporal_modelv1.pt"
+DEFAULT_SCALER = DEPLOY_MODEL_ROOT / "asl_citizen_temporal_scalerv1.npz"
+DEFAULT_LABELS = DEPLOY_MODEL_ROOT / "asl_citizen_temporal_labelsv1.json"
+
+
+def resolve_path(raw_path: str, *, base_dir: Path = WORKSPACE_ROOT) -> Path:
+    path_obj = Path(raw_path)
+    if path_obj.is_absolute():
+        return path_obj
+    return (base_dir / path_obj).resolve()
+
+
+def load_dataset(data_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    data = np.load(data_path, allow_pickle=True)
+    X = data["X"].astype(np.float32)
+    y = data["y"].astype(np.int64)
+    lengths = data["lengths"].astype(np.int64)
+    return X, y, lengths
 
 
 def load_labels(classes_path: Path, non_sign_label: int) -> list[str]:
     if not classes_path.exists():
         return [str(i) for i in range(non_sign_label + 1)]
 
-    with classes_path.open("r", encoding="utf-8") as handle:
-        labels = json.load(handle)
+    if classes_path.suffix.lower() == ".txt":
+        with classes_path.open("r", encoding="utf-8") as handle:
+            labels = [line.strip() for line in handle if line.strip()]
+    else:
+        with classes_path.open("r", encoding="utf-8") as handle:
+            labels = json.load(handle)
 
     if len(labels) <= non_sign_label:
         labels = labels + ["Non-sign"]
@@ -33,19 +57,6 @@ def load_labels(classes_path: Path, non_sign_label: int) -> list[str]:
         labels[non_sign_label] = "Non-sign"
 
     return labels
-
-
-def stratified_split(y: np.ndarray, test_size: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(seed)
-    train_idx = []
-    test_idx = []
-    for label in np.unique(y):
-        idx = np.where(y == label)[0]
-        rng.shuffle(idx)
-        split = int(len(idx) * (1.0 - test_size))
-        train_idx.extend(idx[:split])
-        test_idx.extend(idx[split:])
-    return np.array(train_idx), np.array(test_idx)
 
 
 def compute_mean_std(X: np.ndarray, lengths: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -103,12 +114,13 @@ def metrics_from_confusion(cm: np.ndarray) -> tuple[float, float, float]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train temporal GRU model")
-    parser.add_argument("--data", default=str(DEFAULT_DATA))
+    parser.add_argument("--train-data", default=str(DEFAULT_TRAIN_DATA))
+    parser.add_argument("--val-data", default=str(DEFAULT_VAL_DATA))
+    parser.add_argument("--test-data", default=str(DEFAULT_TEST_DATA))
     parser.add_argument("--classes", default=str(DEFAULT_CLASSES))
     parser.add_argument("--model", default=str(DEFAULT_MODEL))
     parser.add_argument("--scaler", default=str(DEFAULT_SCALER))
     parser.add_argument("--labels", default=str(DEFAULT_LABELS))
-    parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -134,34 +146,41 @@ def main() -> int:
 
     seed_everything(args.seed)
 
-    data_path = Path(args.data)
-    if not data_path.exists():
-        print(f"Missing dataset: {data_path}")
+    train_data_path = resolve_path(args.train_data)
+    val_data_path = resolve_path(args.val_data)
+    test_data_path = resolve_path(args.test_data)
+
+    if not train_data_path.exists():
+        print(f"Missing train dataset: {train_data_path}")
+        return 1
+    if not val_data_path.exists():
+        print(f"Missing val dataset: {val_data_path}")
+        return 1
+    if not test_data_path.exists():
+        print(f"Missing test dataset: {test_data_path}")
         return 1
 
-    data = np.load(data_path, allow_pickle=True)
-    X = data["X"].astype(np.float32)
-    y = data["y"].astype(np.int64)
-    lengths = data["lengths"].astype(np.int64)
+    X_train, y_train, len_train = load_dataset(train_data_path)
+    X_val, y_val, len_val = load_dataset(val_data_path)
+    X_test, y_test, len_test = load_dataset(test_data_path)
 
-    non_sign_label = int(y.max())
-    label_names = load_labels(Path(args.classes), non_sign_label)
-
-    train_idx, test_idx = stratified_split(y, args.test_size, seed=42)
-    X_train, y_train, len_train = X[train_idx], y[train_idx], lengths[train_idx]
-    X_test, y_test, len_test = X[test_idx], y[test_idx], lengths[test_idx]
+    non_sign_label = int(max(y_train.max(), y_val.max(), y_test.max()))
+    classes_path = resolve_path(args.classes)
+    label_names = load_labels(classes_path, non_sign_label)
 
     mean, std = compute_mean_std(X_train, len_train)
     X_train = apply_norm(X_train, mean, std)
+    X_val = apply_norm(X_val, mean, std)
     X_test = apply_norm(X_test, mean, std)
 
     input_dim = int(X_train.shape[2])
-    num_classes = int(y.max()) + 1
+    num_classes = int(max(y_train.max(), y_val.max(), y_test.max())) + 1
     classes, counts = np.unique(y_train, return_counts=True)
     print("Class sample counts:")
     for label, count in zip(classes, counts):
-        print(f"  Label {label_names[label]} ({label}): {count} samples")
-    class_weights = np.zeros(num_classes, dtype=np.float32)
+        label_text = label_names[label] if label < len(label_names) else str(label)
+        print(f"  Label {label_text} ({label}): {count} samples")
+    class_weights = np.ones(num_classes, dtype=np.float32)
     for label, count in zip(classes, counts):
         class_weights[int(label)] = 1.0 / float(count)
     class_weights = class_weights / class_weights.sum() * num_classes
@@ -219,11 +238,19 @@ def main() -> int:
             return self.fc(h)
 
     train_dataset = TemporalDataset(X_train, y_train, len_train)
+    val_dataset = TemporalDataset(X_val, y_val, len_val)
     test_dataset = TemporalDataset(X_test, y_test, len_test)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
+        collate_fn=collate,
+        drop_last=False,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
         collate_fn=collate,
         drop_last=False,
     )
@@ -242,15 +269,57 @@ def main() -> int:
         optimizer, mode="max", factor=0.5, patience=2, min_lr=1e-6
     )
 
-    model_path = Path(args.model)
-    scaler_path = Path(args.scaler)
-    labels_path = Path(args.labels)
+    model_path = resolve_path(args.model)
+    scaler_path = resolve_path(args.scaler)
+    labels_path = resolve_path(args.labels)
 
     best_top1 = 0.0
     best_top5 = 0.0
     best_macro_f1 = 0.0
     best_epoch = 0
     bad_epochs = 0
+
+    def evaluate(loader):
+        model.eval()
+        correct = 0
+        total = 0
+        top5_correct = 0
+        total_eval_loss = 0.0
+        all_true = []
+        all_pred = []
+        with torch.no_grad():
+            for batch_x, batch_y, batch_lens in loader:
+                batch_x = batch_x.to(device)
+                batch_y = batch_y.to(device)
+                batch_lens = batch_lens.to(device)
+                logits = model(batch_x, batch_lens)
+                loss = criterion(logits, batch_y)
+                total_eval_loss += float(loss.item())
+                probs = torch.softmax(logits, dim=1)
+                preds = torch.argmax(probs, dim=1)
+                correct += int((preds == batch_y).sum().item())
+                total += int(batch_y.size(0))
+                all_true.append(batch_y.cpu().numpy())
+                all_pred.append(preds.cpu().numpy())
+                if probs.size(1) >= 5:
+                    top5 = torch.topk(probs, 5, dim=1).indices
+                    top5_correct += int((top5 == batch_y.unsqueeze(1)).any(dim=1).sum().item())
+
+        top1 = correct / total if total else 0.0
+        top5 = top5_correct / total if total and num_classes >= 5 else 0.0
+        avg_loss = total_eval_loss / max(1, len(loader))
+        y_true = np.concatenate(all_true) if all_true else np.array([], dtype=np.int64)
+        y_pred = np.concatenate(all_pred) if all_pred else np.array([], dtype=np.int64)
+        cm = confusion_matrix_from_preds(y_true, y_pred, num_classes) if y_true.size else np.zeros((num_classes, num_classes), dtype=np.int64)
+        macro_precision, macro_recall, macro_f1 = metrics_from_confusion(cm)
+        return {
+            "loss": avg_loss,
+            "top1": top1,
+            "top5": top5,
+            "macro_precision": macro_precision,
+            "macro_recall": macro_recall,
+            "macro_f1": macro_f1,
+        }
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -269,52 +338,27 @@ def main() -> int:
             optimizer.step()
             total_loss += float(loss.item())
 
-        model.eval()
-        correct = 0
-        total = 0
-        top5_correct = 0
-        val_loss = 0.0
-        all_true = []
-        all_pred = []
-        with torch.no_grad():
-            for batch_x, batch_y, batch_lens in test_loader:
-                batch_x = batch_x.to(device)
-                batch_y = batch_y.to(device)
-                batch_lens = batch_lens.to(device)
-                logits = model(batch_x, batch_lens)
-                loss = criterion(logits, batch_y)
-                val_loss += float(loss.item())
-                probs = torch.softmax(logits, dim=1)
-                preds = torch.argmax(probs, dim=1)
-                correct += int((preds == batch_y).sum().item())
-                total += int(batch_y.size(0))
-                all_true.append(batch_y.cpu().numpy())
-                all_pred.append(preds.cpu().numpy())
-                if probs.size(1) >= 5:
-                    top5 = torch.topk(probs, 5, dim=1).indices
-                    top5_correct += int((top5 == batch_y.unsqueeze(1)).any(dim=1).sum().item())
-
-        top1 = correct / total if total else 0.0
-        top5 = top5_correct / total if total and num_classes >= 5 else 0.0
+        val_metrics = evaluate(val_loader)
         avg_loss = total_loss / max(1, len(train_loader))
-        avg_val_loss = val_loss / max(1, len(test_loader))
-        y_true = np.concatenate(all_true) if all_true else np.array([], dtype=np.int64)
-        y_pred = np.concatenate(all_pred) if all_pred else np.array([], dtype=np.int64)
-        cm = confusion_matrix_from_preds(y_true, y_pred, num_classes) if y_true.size else np.zeros((num_classes, num_classes), dtype=np.int64)
-        macro_precision, macro_recall, macro_f1 = metrics_from_confusion(cm)
 
         print(
-            "Epoch {}/{} - loss {:.4f} - val_loss {:.4f} - top1 {:.4f} - top5 {:.4f} - macro_f1 {:.4f}".format(
-                epoch, args.epochs, avg_loss, avg_val_loss, top1, top5, macro_f1
+            "Epoch {}/{} - train_loss {:.4f} - val_loss {:.4f} - val_top1 {:.4f} - val_top5 {:.4f} - val_macro_f1 {:.4f}".format(
+                epoch,
+                args.epochs,
+                avg_loss,
+                val_metrics["loss"],
+                val_metrics["top1"],
+                val_metrics["top5"],
+                val_metrics["macro_f1"],
             )
         )
 
-        scheduler.step(top1)
+        scheduler.step(val_metrics["top1"])
 
-        if top1 > best_top1 + args.min_delta:
-            best_top1 = top1
-            best_top5 = top5
-            best_macro_f1 = macro_f1
+        if val_metrics["top1"] > best_top1 + args.min_delta:
+            best_top1 = val_metrics["top1"]
+            best_top5 = val_metrics["top5"]
+            best_macro_f1 = val_metrics["macro_f1"]
             best_epoch = epoch
             bad_epochs = 0
             best_path = model_path
@@ -327,7 +371,7 @@ def main() -> int:
                     "layers": args.layers,
                     "bidirectional": args.bidirectional,
                     "num_classes": num_classes,
-                    "seq_len": int(X.shape[1]),
+                    "seq_len": int(X_train.shape[1]),
                     "best_top1": float(best_top1),
                     "epoch": int(best_epoch),
                 },
@@ -340,11 +384,27 @@ def main() -> int:
             print(f"Early stopping at epoch {epoch} (best top1 {best_top1:.4f} at epoch {best_epoch}).")
             break
 
+    scaler_path.parent.mkdir(parents=True, exist_ok=True)
+    labels_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(scaler_path, mean=mean, std=std)
+    labels_path.write_text(json.dumps(label_names, indent=2), encoding="utf-8")
+
+    if model_path.exists():
+        checkpoint = torch.load(model_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state"])
+    test_metrics = evaluate(test_loader)
 
     print(f"Best model saved: {model_path}")
     print(f"Scaler saved: {scaler_path}")
-    print(f"Labels file used: {labels_path}")
+    print(f"Labels file saved: {labels_path}")
+    print(
+        "Final test metrics - loss {:.4f} - top1 {:.4f} - top5 {:.4f} - macro_f1 {:.4f}".format(
+            test_metrics["loss"],
+            test_metrics["top1"],
+            test_metrics["top5"],
+            test_metrics["macro_f1"],
+        )
+    )
     return 0
 
 
