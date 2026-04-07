@@ -64,8 +64,7 @@ class GoogleTTS:
 
 def play_audio_file(audio_path: str) -> None:
     """
-    Simple local playback (works well on laptops).
-    If your environment can't play audio, just skip calling this.
+    Simple local playback using pydub + simpleaudio.
     """
     from pydub import AudioSegment
     import simpleaudio as sa

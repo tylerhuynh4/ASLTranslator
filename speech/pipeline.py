@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from .config import SpeechConfig
 from .text_processing import TemporalSmoother, TokenBuffer, clean_text
@@ -52,6 +53,14 @@ class SpeechPipeline:
         self._frame_since_confirm = 999
         self._last_confirmed = None
 
+    @staticmethod
+    def _token_to_spoken_text(token: str) -> str:
+        # Model labels are often uppercase and may include numeric suffixes like WHAT1.
+        # Normalize to natural speech text to avoid letter-by-letter pronunciation.
+        token = token.strip().replace("_", " ")
+        token = re.sub(r"\d+$", "", token)
+        return token.lower()
+
     def update_frame_prediction(self, pred: str) -> PipelineOutput:
         """
         Call this every frame with the model's predicted label (e.g., 'H', 'SPACE').
@@ -90,10 +99,13 @@ class SpeechPipeline:
             translated = self.translator.translate_text(english, target_language=self.cfg.target_language)
 
         audio_path = None
-        # Only speak when SPACE is confirmed (word boundary)
-        if self.cfg.enable_tts and self.tts and confirmed == self.cfg.space_token and english:
-            res = self.tts.synthesize(english)
-            audio_path = res.audio_path
+        # Speak only the newly confirmed token to avoid replaying the full sentence each time.
+        if self.cfg.enable_tts and self.tts and confirmed:
+            blocked_tokens = {"Non-sign", self.cfg.space_token, self.cfg.delete_token, self.cfg.clear_token}
+            if confirmed not in blocked_tokens:
+                spoken = self._token_to_spoken_text(confirmed)
+                res = self.tts.synthesize(spoken)
+                audio_path = res.audio_path
 
         return PipelineOutput(
             confirmed_token=confirmed,
