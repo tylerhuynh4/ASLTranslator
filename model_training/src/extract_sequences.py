@@ -26,13 +26,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Project-level model_training directory (one level above this src file)
 MODEL_ROOT = SCRIPT_DIR.parent
 WORKSPACE_ROOT = SCRIPT_DIR.parent.parent
+DATASET_ROOT = MODEL_ROOT / "data" / "ASL_Citizen"
 MODEL_PATH = MODEL_ROOT / "hand_landmarker.task"
 POSE_MODEL_PATH = MODEL_ROOT / "pose_landmarker_full.task"
-DEFAULT_SPLIT = WORKSPACE_ROOT / "ASL_Citizen" / "splits" / "train.csv"
-# Data and output paths are under the model_training root, not the src dir
-DEFAULT_NEG_DIR = MODEL_ROOT / "data" / "negatives" / "clips"
-DEFAULT_OUT = MODEL_ROOT / "data" / "asl_sequences.npz"
-DEFAULT_SUBSET = WORKSPACE_ROOT / "ASL_Citizen" / "subset_glosses.txt"
+# Default run config so extraction can be launched with only:
+# python model_training/src/extract_sequences.py
+DEFAULT_SPLIT_NAME = "val"  # train, val, or test
+DEFAULT_SPLIT = DATASET_ROOT / "splits" / f"{DEFAULT_SPLIT_NAME}.csv"
+DEFAULT_NEG_DIR = MODEL_ROOT / "data" / "negatives" / DEFAULT_SPLIT_NAME
+DEFAULT_OUT = MODEL_ROOT / "data" / f"demo2H_sequences_{DEFAULT_SPLIT_NAME}.npz"
+DEFAULT_SUBSET = DATASET_ROOT / "subset_glosses.txt"
+USE_TWO_HANDS = True  # set False for one-hand extraction experiment
+USE_HAND_PRESENCE = True
 
 
 def load_subset_signs(path: Path) -> list[str]:
@@ -201,16 +206,20 @@ def main() -> int:
 
     neg_dir = Path(args.neg_dir)
     if not neg_dir.is_absolute():
-        neg_dir = SCRIPT_DIR.joinpath(args.neg_dir).resolve()
-    neg_paths = sorted(neg_dir.glob("*.mp4"))
+        neg_dir = WORKSPACE_ROOT / args.neg_dir
+    if not neg_dir.exists():
+        print(f"Warning: negative directory does not exist: {neg_dir}")
+        neg_paths = []
+    else:
+        neg_paths = sorted(neg_dir.glob("*.mp4"))
 
     BaseOptions = python.BaseOptions
     HandLandmarker = vision.HandLandmarker
     HandLandmarkerOptions = vision.HandLandmarkerOptions
     VisionRunningMode = vision.RunningMode
 
-    use_two_hands = True
-    use_hand_presence = True
+    use_two_hands = USE_TWO_HANDS
+    use_hand_presence = USE_HAND_PRESENCE
 
 
     options = HandLandmarkerOptions(
@@ -249,8 +258,8 @@ def main() -> int:
 
     manifest_iter = tqdm(items, desc="ASL_Citizen clips", unit="clip") if tqdm else items
     for item in manifest_iter:
-        # Video path is relative to ASL_Citizen/videos/
-        video_path = WORKSPACE_ROOT / "ASL_Citizen" / "videos" / item["video_file"]
+        # Video path is relative to model_training/data/ASL_Citizen/videos/
+        video_path = DATASET_ROOT / "videos" / item["video_file"]
         result = extract_clip_sequence(
             landmarker,
             pose_landmarker,
