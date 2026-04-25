@@ -66,14 +66,5 @@ def play_audio_file(audio_path: str) -> None:
     """
     Simple local playback using pydub + simpleaudio.
     """
-    from pydub import AudioSegment
-    import simpleaudio as sa
-
-    seg = AudioSegment.from_file(audio_path)
-    play_obj = sa.play_buffer(
-        seg.raw_data,
-        num_channels=seg.channels,
-        bytes_per_sample=seg.sample_width,
-        sample_rate=seg.frame_rate,
-    )
-    play_obj.wait_done()
+    from playsound import playsound
+    playsound(audio_path)

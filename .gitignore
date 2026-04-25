@@ -1,0 +1,36 @@
+.env
+gcp-key*.json
+service-account*.json
+*-credentials.json
+
+# .py
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# venv
+venv/
+.venv/
+env/
+
+# Generated TTS audio
+tts_out/
+*.mp3
+*.wav
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# st cache
+.streamlit/secrets.toml
+
+# misc
+build/
+dist/
+*.egg-info/
