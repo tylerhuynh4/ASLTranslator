@@ -1,6 +1,7 @@
 from __future__ import annotations
 from collections import Counter, deque
 from dataclasses import dataclass
+import re
 
 @dataclass
 class TextState:
@@ -93,3 +94,15 @@ def clean_text(text: str) -> str:
         return ""
     # Capitalize first letter; keep rest as-is
     return text[0].upper() + text[1:]
+
+
+def normalize_spoken_token(token: str) -> str:
+    token = token.strip().replace("_", " ")
+    token = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", token)
+    token = re.sub(r"\s+", " ", token).strip()
+
+    lowered = token.lower()
+    if lowered == "thankyou":
+        return "thank you"
+
+    return lowered

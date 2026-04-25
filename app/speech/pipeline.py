@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 
 from .config import SpeechConfig
-from .text_processing import TemporalSmoother, TokenBuffer, clean_text
+from .text_processing import TemporalSmoother, TokenBuffer, clean_text, normalize_spoken_token
 
 
 @dataclass
@@ -53,14 +52,6 @@ class SpeechPipeline:
         self._frame_since_confirm = 999
         self._last_confirmed = None
 
-    @staticmethod
-    def _token_to_spoken_text(token: str) -> str:
-        # Model labels are often uppercase and may include numeric suffixes like WHAT1.
-        # Normalize to natural speech text to avoid letter-by-letter pronunciation.
-        token = token.strip().replace("_", " ")
-        token = re.sub(r"\d+$", "", token)
-        return token.lower()
-
     def update_frame_prediction(self, pred: str) -> PipelineOutput:
         """
         Call this every frame with the model's predicted label (e.g., 'H', 'SPACE').
@@ -103,7 +94,7 @@ class SpeechPipeline:
         if self.cfg.enable_tts and self.tts and confirmed:
             blocked_tokens = {"Non-sign", self.cfg.space_token, self.cfg.delete_token, self.cfg.clear_token}
             if confirmed not in blocked_tokens:
-                spoken = self._token_to_spoken_text(confirmed)
+                spoken = normalize_spoken_token(confirmed)
                 res = self.tts.synthesize(spoken)
                 audio_path = res.audio_path
 

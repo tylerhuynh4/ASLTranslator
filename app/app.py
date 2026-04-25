@@ -15,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from speech.translator import GoogleTranslator
 from speech.tts import GoogleTTS
+from speech.text_processing import normalize_spoken_token
 
 # Language code maps 
 LANGUAGE_CODES = {
@@ -89,6 +90,8 @@ if "transcript" not in st.session_state:
     st.session_state.transcript = []        # list of (word, confidence) tuples
 if "last_spoken_text" not in st.session_state:
     st.session_state.last_spoken_text = ""  # no same text every autorefresh
+if "last_spoken_count" not in st.session_state:
+    st.session_state.last_spoken_count = 0
 
 # retranslation cache | skip API calls when sentence + target no change
 if "last_translated_sentence" not in st.session_state:
@@ -187,6 +190,7 @@ with st.sidebar:
     if st.button("Clear Transcript", use_container_width = True):
         st.session_state.transcript = []
         st.session_state.last_spoken_text = ""
+        st.session_state.last_spoken_count = 0
         st.session_state.last_translated_sentence = ""
         st.session_state.last_translated_target = ""
         st.session_state.last_translated_output = ""
@@ -312,16 +316,34 @@ if st.session_state.transcript:
     st.markdown(f'<div class = "translation-box"><b>Translated sentence:</b><br>{translated_sentence}</div>',
                 unsafe_allow_html = True,)
 
-    # TTS 
-    spoken_text = translated_sentence if translated_sentence else sentence
+    # TTS speaks only transcript entries that have not been spoken yet.
+    while st.session_state.last_spoken_count < len(st.session_state.transcript):
+        next_word = st.session_state.transcript[st.session_state.last_spoken_count][0].strip()
+        st.session_state.last_spoken_count += 1
 
-    if enable_tts and spoken_text and spoken_text != st.session_state.last_spoken_text:
-        try:
-            tts_language = "en-US" if selected_language == "English" else TTS_CODES[selected_language]
-            tts = get_tts(tts_language)
-            result = tts.synthesize(spoken_text)
-            audio_bytes = Path(result.audio_path).read_bytes()
-            st.audio(audio_bytes, format = "audio/mp3", autoplay = True)
-            st.session_state.last_spoken_text = spoken_text
-        except Exception as exc:
-            st.error(f"TTS Failed: {exc}")
+        if not next_word:
+            continue
+
+        spoken_text = normalize_spoken_token(next_word)
+        if target_code != "en":
+            try:
+                translator = get_translator(PROJECT_ID)
+                spoken_text = translator.translate_text(
+                    next_word,
+                    target_language = target_code,
+                    source_language = "en",
+                )
+            except Exception as exc:
+                st.error(f"Word translation failed: {exc}")
+                continue
+
+        if enable_tts and spoken_text:
+            try:
+                tts_language = "en-US" if selected_language == "English" else TTS_CODES[selected_language]
+                tts = get_tts(tts_language)
+                result = tts.synthesize(spoken_text)
+                audio_bytes = Path(result.audio_path).read_bytes()
+                st.audio(audio_bytes, format = "audio/mp3", autoplay = True)
+                st.session_state.last_spoken_text = spoken_text
+            except Exception as exc:
+                st.error(f"TTS Failed: {exc}")
