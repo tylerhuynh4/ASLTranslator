@@ -22,6 +22,7 @@ except Exception:
     tqdm = None
 
 
+# Core paths and default extraction outputs.
 SCRIPT_DIR = Path(__file__).resolve().parent
 # Project-level model_training directory (one level above this src file)
 MODEL_ROOT = SCRIPT_DIR.parent
@@ -40,6 +41,7 @@ USE_TWO_HANDS = True  # set False for one-hand extraction experiment
 USE_HAND_PRESENCE = True
 
 
+# Load allowed gloss vocabulary for subset extraction.
 def load_subset_signs(path: Path) -> list[str]:
     with path.open("r", encoding="utf-8") as handle:
         return [line.strip() for line in handle if line.strip()]
@@ -52,6 +54,7 @@ def extract_frame_landmarks(
     two_hands: bool,
     hand_presence: bool,
 ) -> np.ndarray:
+    # Convert frame to MediaPipe image format and run both detectors.
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
     # Hand landmarks
@@ -115,6 +118,7 @@ def extract_clip_sequence(
     two_hands: bool,
     hand_presence: bool,
 ) -> tuple[np.ndarray, int] | None:
+    # Read one video and convert it into a fixed-length feature sequence.
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return None
@@ -127,6 +131,7 @@ def extract_clip_sequence(
         if not success:
             break
 
+        # Temporal downsampling keeps runtime lower and smooths tiny frame-to-frame jitter.
         if frame_index % frame_stride != 0:
             frame_index += 1
             continue
@@ -142,14 +147,17 @@ def extract_clip_sequence(
     if not frames:
         return None
 
+    # Stack all extracted per-frame features into [time, feature_dim].
     data = np.stack(frames, axis=0)
     length = min(seq_len, data.shape[0])
 
     if data.shape[0] > seq_len:
+        # Uniformly resample long clips so every sample has a fixed temporal size.
         idx = np.linspace(0, data.shape[0] - 1, seq_len).astype(int)
         data = data[idx]
         length = seq_len
     else:
+        # Zero-pad short clips to fixed length; original valid length is tracked separately.
         pad = np.zeros((seq_len - data.shape[0], data.shape[1]), dtype=np.float32)
         data = np.concatenate([data, pad], axis=0)
 
@@ -157,6 +165,7 @@ def extract_clip_sequence(
 
 
 def main() -> int:
+    # Parse extraction inputs/outputs from CLI.
     parser = argparse.ArgumentParser(description="Extract landmark sequences from ASL_Citizen CSV")
     parser.add_argument("--split", default=str(DEFAULT_SPLIT), help="CSV split file (train.csv, val.csv, test.csv)")
     parser.add_argument("--neg-dir", default=str(DEFAULT_NEG_DIR))
@@ -170,6 +179,7 @@ def main() -> int:
         print(f"Missing model file: {MODEL_PATH}")
         return 1
 
+    # Resolve and validate split/subset files.
     WORKSPACE_ROOT = SCRIPT_DIR.parent.parent
     split_path = Path(args.split)
     if not split_path.is_absolute():
@@ -188,6 +198,7 @@ def main() -> int:
     if not subset_signs:
         print(f"Subset file is empty: {subset_path}")
         return 1
+    # Deterministic class-id mapping based on subset file order.
     subset_index = {name: idx for idx, name in enumerate(subset_signs)}
 
     # Read CSV and filter items
@@ -213,6 +224,7 @@ def main() -> int:
     else:
         neg_paths = sorted(neg_dir.glob("*.mp4"))
 
+    # Build MediaPipe hand/pose landmarkers once and reuse for all clips.
     BaseOptions = python.BaseOptions
     HandLandmarker = vision.HandLandmarker
     HandLandmarkerOptions = vision.HandLandmarkerOptions
@@ -242,6 +254,7 @@ def main() -> int:
     landmarker = HandLandmarker.create_from_options(options)
     pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
 
+    # Buffers that accumulate final dataset contents.
     sequences = []
     lengths = []
     labels = []
@@ -256,6 +269,7 @@ def main() -> int:
     if tqdm is None:
         print("Tip: Install tqdm for progress bars: python -m pip install tqdm")
 
+    # Process labeled ASL clips.
     manifest_iter = tqdm(items, desc="ASL_Citizen clips", unit="clip") if tqdm else items
     for item in manifest_iter:
         # Video path is relative to model_training/data/ASL_Citizen/videos/
@@ -282,6 +296,7 @@ def main() -> int:
     nonsign_label = len(subset_signs)
     nonsign_count = 0
 
+    # Process negative clips and assign them to Non-sign class.
     neg_iter = tqdm(neg_paths, desc="Negative clips", unit="clip") if tqdm else neg_paths
     for clip_path in neg_iter:
         result = extract_clip_sequence(
@@ -296,6 +311,7 @@ def main() -> int:
         if result is None:
             continue
         seq, length = result
+        # Negatives are appended as a dedicated class to reduce false positives in live use.
         sequences.append(seq)
         lengths.append(length)
         labels.append(nonsign_label)
@@ -305,6 +321,7 @@ def main() -> int:
         kept += 1
 
 
+    # Release detector resources before writing output.
     landmarker.close()
     pose_landmarker.close()
 
@@ -318,15 +335,18 @@ def main() -> int:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Save arrays used directly by the training script.
     np.savez_compressed(
         out_path,
         X=X,
         y=y,
+        # lengths preserves how many frames were actually observed before padding.
         lengths=lengths_arr,
         paths=np.array(paths),
         texts=np.array(texts),
     )
 
+    # Save a sidecar metadata file for debugging/reproducibility.
     meta_path = out_path.with_suffix(".json")
     meta = {
         "samples": int(len(y)),

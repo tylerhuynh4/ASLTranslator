@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 
 
+# Core project paths used by default arguments and saved artifacts.
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODEL_ROOT = SCRIPT_DIR.parent
 WORKSPACE_ROOT = MODEL_ROOT.parent
@@ -43,6 +44,7 @@ DEFAULT_SEED = 42
 DEFAULT_GRAD_CLIP = 1.0
 
 
+# Resolve relative CLI/file inputs to absolute paths under the workspace.
 def resolve_path(raw_path: str, *, base_dir: Path = WORKSPACE_ROOT) -> Path:
     path_obj = Path(raw_path)
     if path_obj.is_absolute():
@@ -50,6 +52,7 @@ def resolve_path(raw_path: str, *, base_dir: Path = WORKSPACE_ROOT) -> Path:
     return (base_dir / path_obj).resolve()
 
 
+# Load extracted sequence tensors from .npz.
 def load_dataset(data_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     data = np.load(data_path, allow_pickle=True)
     X = data["X"].astype(np.float32)
@@ -58,6 +61,7 @@ def load_dataset(data_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return X, y, lengths
 
 
+# Build class-name list and force the final class index to be Non-sign.
 def load_labels(classes_path: Path, non_sign_label: int) -> list[str]:
     if not classes_path.exists():
         return [str(i) for i in range(non_sign_label + 1)]
@@ -78,6 +82,7 @@ def load_labels(classes_path: Path, non_sign_label: int) -> list[str]:
 
 
 def compute_mean_std(X: np.ndarray, lengths: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # Compute stats only over valid (unpadded) timesteps to avoid pad-biased normalization.
     total = np.zeros(X.shape[2], dtype=np.float64)
     total_sq = np.zeros(X.shape[2], dtype=np.float64)
     count = 0
@@ -96,9 +101,11 @@ def compute_mean_std(X: np.ndarray, lengths: np.ndarray) -> tuple[np.ndarray, np
 
 
 def apply_norm(X: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    # Apply feature-wise z-score normalization to every timestep.
     return (X - mean[None, None, :]) / std[None, None, :]
 
 
+# Seed NumPy/Torch for reproducible runs.
 def seed_everything(seed: int) -> None:
     try:
         import torch
@@ -110,6 +117,7 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+# Build confusion matrix from predicted and true class ids.
 def confusion_matrix_from_preds(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> np.ndarray:
     cm = np.zeros((num_classes, num_classes), dtype=np.int64)
     for t, p in zip(y_true, y_pred):
@@ -117,6 +125,7 @@ def confusion_matrix_from_preds(y_true: np.ndarray, y_pred: np.ndarray, num_clas
     return cm
 
 
+# Compute macro-averaged precision/recall/F1 from confusion matrix.
 def metrics_from_confusion(cm: np.ndarray) -> tuple[float, float, float]:
     tp = np.diag(cm).astype(np.float64)
     fp = cm.sum(axis=0) - tp
@@ -131,6 +140,7 @@ def metrics_from_confusion(cm: np.ndarray) -> tuple[float, float, float]:
 
 
 def main() -> int:
+    # Parse training/data/output settings from CLI.
     parser = argparse.ArgumentParser(description="Train temporal GRU model")
     parser.add_argument("--train-data", default=str(DEFAULT_TRAIN_DATA))
     parser.add_argument("--val-data", default=str(DEFAULT_VAL_DATA))
@@ -162,6 +172,7 @@ def main() -> int:
         print("Install with: python -m pip install torch", file=sys.stderr)
         return 2
 
+    # Make run deterministic as much as practical.
     seed_everything(args.seed)
 
     train_data_path = resolve_path(args.train_data)
@@ -178,6 +189,7 @@ def main() -> int:
         print(f"Missing test dataset: {test_data_path}")
         return 1
 
+    # Load train/val/test splits produced by extract_sequences.py.
     X_train, y_train, len_train = load_dataset(train_data_path)
     X_val, y_val, len_val = load_dataset(val_data_path)
     X_test, y_test, len_test = load_dataset(test_data_path)
@@ -186,6 +198,7 @@ def main() -> int:
     classes_path = resolve_path(args.classes)
     label_names = load_labels(classes_path, non_sign_label)
 
+    # Fit scaler on train split only, then reuse for val/test to prevent data leakage.
     mean, std = compute_mean_std(X_train, len_train)
     X_train = apply_norm(X_train, mean, std)
     X_val = apply_norm(X_val, mean, std)
@@ -193,6 +206,8 @@ def main() -> int:
 
     input_dim = int(X_train.shape[2])
     num_classes = int(max(y_train.max(), y_val.max(), y_test.max())) + 1
+
+    # Print class balance so imbalance issues are visible before training.
     classes, counts = np.unique(y_train, return_counts=True)
     print("Class sample counts:")
     for label, count in zip(classes, counts):
@@ -200,11 +215,14 @@ def main() -> int:
         print(f"  Label {label_text} ({label}): {count} samples")
     class_weights = np.ones(num_classes, dtype=np.float32)
     for label, count in zip(classes, counts):
+        # Inverse-frequency weighting helps reduce dominance of frequent classes (e.g., Non-sign).
         class_weights[int(label)] = 1.0 / float(count)
     class_weights = class_weights / class_weights.sum() * num_classes
 
+    # Use GPU when available, else CPU.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Lightweight dataset wrapper consumed by PyTorch DataLoader.
     class TemporalDataset(Dataset):
         def __init__(self, X_arr, y_arr, len_arr):
             self.X = X_arr
@@ -217,9 +235,11 @@ def main() -> int:
         def __getitem__(self, idx: int):
             return self.X[idx], self.y[idx], self.lengths[idx]
 
+    # Collate into tensors and keep sequence lengths aligned with sorted order.
     def collate(batch):
         xs, ys, lens = zip(*batch)
         lens = np.array(lens, dtype=np.int64)
+        # Sort by length (descending) so pack_padded_sequence can skip padded timesteps efficiently.
         order = np.argsort(-lens)
         xs = np.stack(xs, axis=0)[order]
         ys = np.array(ys, dtype=np.int64)[order]
@@ -230,6 +250,7 @@ def main() -> int:
             torch.from_numpy(lens).long(),
         )
 
+    # GRU encoder over temporal sequence, followed by linear classifier head.
     class GRUModel(nn.Module):
         def __init__(self, input_dim: int, hidden: int, layers: int, bidirectional: bool, num_classes: int):
             super().__init__()
@@ -245,6 +266,7 @@ def main() -> int:
             self.fc = nn.Linear(out_dim, num_classes)
 
         def forward(self, x, lengths_tensor):
+            # Packed RNN avoids learning from padded frames and speeds variable-length training.
             packed = nn.utils.rnn.pack_padded_sequence(
                 x, lengths_tensor.cpu(), batch_first=True, enforce_sorted=True
             )
@@ -255,6 +277,7 @@ def main() -> int:
                 h = h[-1]
             return self.fc(h)
 
+    # Build dataloaders for train/val/test evaluation loops.
     train_dataset = TemporalDataset(X_train, y_train, len_train)
     val_dataset = TemporalDataset(X_val, y_val, len_val)
     test_dataset = TemporalDataset(X_test, y_test, len_test)
@@ -280,6 +303,7 @@ def main() -> int:
         drop_last=False,
     )
 
+    # Configure model, loss, optimizer, and LR scheduler.
     model = GRUModel(input_dim, args.hidden, args.layers, args.bidirectional, num_classes).to(device)
     criterion = nn.CrossEntropyLoss(weight=torch.tensor(class_weights, device=device))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -291,12 +315,14 @@ def main() -> int:
     scaler_path = resolve_path(args.scaler)
     labels_path = resolve_path(args.labels)
 
+    # Track best validation checkpoint state for early stopping.
     best_top1 = 0.0
     best_top5 = 0.0
     best_macro_f1 = 0.0
     best_epoch = 0
     bad_epochs = 0
 
+    # Shared validation/test evaluation helper.
     def evaluate(loader):
         model.eval()
         correct = 0
@@ -320,6 +346,7 @@ def main() -> int:
                 all_true.append(batch_y.cpu().numpy())
                 all_pred.append(preds.cpu().numpy())
                 if probs.size(1) >= 5:
+                    # Top-5 is useful for diagnostics, but model selection below uses top-1.
                     top5 = torch.topk(probs, 5, dim=1).indices
                     top5_correct += int((top5 == batch_y.unsqueeze(1)).any(dim=1).sum().item())
 
@@ -339,6 +366,7 @@ def main() -> int:
             "macro_f1": macro_f1,
         }
 
+    # Main training loop.
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
@@ -352,6 +380,7 @@ def main() -> int:
             loss = criterion(logits, batch_y)
             loss.backward()
             if args.grad_clip > 0:
+                # Clip gradients to stabilize updates on noisy small datasets.
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
             total_loss += float(loss.item())
@@ -373,6 +402,7 @@ def main() -> int:
 
         scheduler.step(val_metrics["top1"])
 
+        # Select checkpoints strictly by validation top-1, since that is demo-critical.
         if val_metrics["top1"] > best_top1 + args.min_delta:
             best_top1 = val_metrics["top1"]
             best_top5 = val_metrics["top5"]
@@ -383,6 +413,7 @@ def main() -> int:
             best_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
+                    # Save everything needed for inference reconstruction.
                     "model_state": model.state_dict(),
                     "input_dim": input_dim,
                     "hidden": args.hidden,
@@ -399,17 +430,22 @@ def main() -> int:
             bad_epochs += 1
 
         if args.patience > 0 and bad_epochs >= args.patience:
+            # Stop when top-1 has plateaued to reduce overfitting and wasted epochs.
             print(f"Early stopping at epoch {epoch} (best top1 {best_top1:.4f} at epoch {best_epoch}).")
             break
 
+    # Persist normalization stats and class labels used by the trained model.
     scaler_path.parent.mkdir(parents=True, exist_ok=True)
     labels_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(scaler_path, mean=mean, std=std)
     labels_path.write_text(json.dumps(label_names, indent=2), encoding="utf-8")
 
     if model_path.exists():
+        # Re-load best checkpoint before final test report.
         checkpoint = torch.load(model_path, map_location=device)
         model.load_state_dict(checkpoint["model_state"])
+
+    # Final unbiased report on held-out test split.
     test_metrics = evaluate(test_loader)
 
     print(f"Best model saved: {model_path}")
