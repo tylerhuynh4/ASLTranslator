@@ -2,7 +2,7 @@
 CLI runner for live webcam model + speech pipeline integration.
 
 Usage:
-    python model_training/src/run_live_demo.py --camera 0 --enable-tts --play-audio
+    python inference/run_live_demo.py --camera 0 --enable-tts --play-audio
 """
 
 from __future__ import annotations
@@ -58,13 +58,13 @@ def main() -> int:
         return 2
 
     # Import speech modules lazily so plain predictor imports stay lightweight.
-    play_audio_file = None
+    play_audio_bytes = None
     try:
         from speech.config import SpeechConfig
         from speech.pipeline import SpeechPipeline
         if args.play_audio:
-            from speech.tts import play_audio_file as _play_audio_file
-            play_audio_file = _play_audio_file
+            from speech.tts import play_audio_bytes as _play_audio_bytes
+            play_audio_bytes = _play_audio_bytes
     except Exception as exc:
         print(f"Unable to import speech pipeline: {exc}")
         return 2
@@ -161,13 +161,13 @@ def main() -> int:
                     last_logged_token = out.confirmed_token
                     last_logged_frame = frame_count
 
-            if out.tts_audio_path:
-                print(f"\n[Audio: {out.tts_audio_path}]", end=" ")
-                if play_audio_file is not None:
+            if out.tts_audio_bytes:
+                print("\n[Audio generated]", end=" ")
+                if play_audio_bytes is not None and out.tts_sample_rate_hz is not None:
                     try:
                         threading.Thread(
-                            target=play_audio_file,
-                            args=(out.tts_audio_path,),
+                            target=play_audio_bytes,
+                            args=(out.tts_audio_bytes, out.tts_sample_rate_hz),
                             daemon=True,
                         ).start()
                     except Exception as exc:

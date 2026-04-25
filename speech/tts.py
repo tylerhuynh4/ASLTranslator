@@ -1,11 +1,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from pathlib import Path
-import time
 
 @dataclass
 class TTSResult:
-    audio_path: str
+    audio_bytes: bytes
+    sample_rate_hz: int
     text: str
 
 class GoogleTTS:
@@ -15,7 +14,7 @@ class GoogleTTS:
     """
     def __init__(self, language_code="en-US", voice_name: str | None = None,
                  speaking_rate: float = 1.0, pitch: float = 0.0,
-                 out_dir: str = "tts_out"):
+                 sample_rate_hz: int = 24000):
         from google.cloud import texttospeech
         self.texttospeech = texttospeech
         self.client = texttospeech.TextToSpeechClient()
@@ -24,9 +23,7 @@ class GoogleTTS:
         self.voice_name = voice_name
         self.speaking_rate = speaking_rate
         self.pitch = pitch
-
-        self.out_dir = Path(out_dir)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.sample_rate_hz = int(sample_rate_hz)
 
     def synthesize(self, text: str) -> TTSResult:
         if not text:
@@ -46,9 +43,10 @@ class GoogleTTS:
             )
 
         audio_config = self.texttospeech.AudioConfig(
-            audio_encoding=self.texttospeech.AudioEncoding.MP3,
+            audio_encoding=self.texttospeech.AudioEncoding.LINEAR16,
             speaking_rate=self.speaking_rate,
             pitch=self.pitch,
+            sample_rate_hertz=self.sample_rate_hz,
         )
 
         response = self.client.synthesize_speech(
@@ -57,14 +55,30 @@ class GoogleTTS:
             audio_config=audio_config,
         )
 
-        fname = f"tts_{int(time.time()*1000)}.mp3"
-        path = self.out_dir / fname
-        path.write_bytes(response.audio_content)
-        return TTSResult(audio_path=str(path), text=text)
+        return TTSResult(
+            audio_bytes=response.audio_content,
+            sample_rate_hz=self.sample_rate_hz,
+            text=text,
+        )
+
+
+def play_audio_bytes(audio_bytes: bytes, sample_rate_hz: int = 24000) -> None:
+    """
+    Play LINEAR16 mono PCM audio bytes directly from memory.
+    """
+    import simpleaudio as sa
+
+    play_obj = sa.play_buffer(
+        audio_bytes,
+        num_channels=1,
+        bytes_per_sample=2,
+        sample_rate=int(sample_rate_hz),
+    )
+    play_obj.wait_done()
 
 def play_audio_file(audio_path: str) -> None:
     """
-    Simple local playback using pydub + simpleaudio.
+    Backward-compatible file playback helper (MP3/WAV/etc.).
     """
     from pydub import AudioSegment
     import simpleaudio as sa

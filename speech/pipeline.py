@@ -14,6 +14,8 @@ class PipelineOutput:
     english_text: str
     translated_text: str
     tts_audio_path: str | None
+    tts_audio_bytes: bytes | None
+    tts_sample_rate_hz: int | None
 
 
 class SpeechPipeline:
@@ -99,19 +101,24 @@ class SpeechPipeline:
             translated = self.translator.translate_text(english, target_language=self.cfg.target_language)
 
         audio_path = None
+        audio_bytes = None
+        sample_rate_hz = None
         # Speak only the newly confirmed token to avoid replaying the full sentence each time.
         if self.cfg.enable_tts and self.tts and confirmed:
             blocked_tokens = {"Non-sign", self.cfg.space_token, self.cfg.delete_token, self.cfg.clear_token}
             if confirmed not in blocked_tokens:
                 spoken = self._token_to_spoken_text(confirmed)
                 res = self.tts.synthesize(spoken)
-                audio_path = res.audio_path
+                audio_bytes = res.audio_bytes
+                sample_rate_hz = res.sample_rate_hz
 
         return PipelineOutput(
             confirmed_token=confirmed,
             english_text=english,
             translated_text=translated,
             tts_audio_path=audio_path,
+            tts_audio_bytes=audio_bytes,
+            tts_sample_rate_hz=sample_rate_hz,
         )
 
  
