@@ -17,25 +17,20 @@
 ## Requirements
 Note: Requirements are subject to change as development progresses
 - Real time webcam hand detection 
-- Accurate recognition of ASL ABC & some words (static) 
+- Average accuracy on detected signs
 - Text output from detected signs
 - Stability of software and accuracy of interpretation
 - Translation to at least 2 languages 
 - Text to speech (audio output)
 - Clean UI 
 - Visual indicators + stats (shown in UI preview from Tyler)
-- Dynamic signage 
-- Translate at least 1 full sentence of signs 
+- Dynamic signage  
 - Feedback Adaptation (User Profiles)
 - ADA requirements (Like color contrast, keyboard navigation)
-- Logging of detected signs
-- Saving logs of interpretation
-- Live correction of signs/sentence structure
+- Logging of detected signs (Transcript)
 - Toggle overlay and indicators on/off
 - UI Themes
 - Hardware configuration (changing camera/speaker)
-- User being able to flag incorrect translations
-- Customize TTS voice
 - Mute/unmute TTS voice
 
    
